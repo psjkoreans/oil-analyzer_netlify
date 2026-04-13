@@ -1,65 +1,126 @@
-import json
-import base64
-import cv2
-import numpy as np
+const Jimp = require('jimp');
 
-def handler(event, context):
-    try:
-        # POST 메서드 검증
-        if event.get('httpMethod') != 'POST':
+// [핵심 보정] RGB를 OpenCV의 8-bit LAB 규격으로 변환하는 수식
+function rgbToOpenCVLab(R, G, B) {
+    let r = R / 255.0, g = G / 255.0, b = B / 255.0;
+
+    // sRGB -> Linear RGB (Gamma Correction)
+    r = r > 0.04045 ? Math.pow((r + 0.055) / 1.055, 2.4) : r / 12.92;
+    g = g > 0.04045 ? Math.pow((g + 0.055) / 1.055, 2.4) : g / 12.92;
+    b = b > 0.04045 ? Math.pow((b + 0.055) / 1.055, 2.4) : b / 12.92;
+
+    r *= 100; g *= 100; b *= 100;
+
+    // D65 Standard Illuminant 변환 (XYZ Space)
+    let x = r * 0.4124 + g * 0.3576 + b * 0.1805;
+    let y = r * 0.2126 + g * 0.7152 + b * 0.0722;
+    let z = r * 0.0193 + g * 0.1192 + b * 0.9505;
+
+    x /= 95.047; y /= 100.000; z /= 108.883;
+
+    x = x > 0.008856 ? Math.cbrt(x) : (7.787 * x) + (16 / 116);
+    y = y > 0.008856 ? Math.cbrt(y) : (7.787 * y) + (16 / 116);
+    z = z > 0.008856 ? Math.cbrt(z) : (7.787 * z) + (16 / 116);
+
+    // Standard CIELAB Space
+    let L = (116 * y) - 16;
+    let a = 500 * (x - y);
+    let b_val = 200 * (y - z);
+
+    // [중요] OpenCV 8-bit LAB Scaling 대응
+    let cv_L = L * 2.55;
+    let cv_a = a + 128;
+    let cv_b = b_val + 128;
+
+    return [cv_L, cv_a, cv_b];
+}
+
+exports.handler = async function(event, context) {
+    try {
+        // POST 메서드 검증 (HTTP 405)
+        if (event.httpMethod !== 'POST') {
             return {
-                "statusCode": 405,
-                "body": json.dumps({"error": "Method Not Allowed"})
+                statusCode: 405,
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ error: "Method Not Allowed" })
+            };
+        }
+
+        // JSON 페이로드 파싱
+        const bodyStr = event.body || '{}';
+        if (!bodyStr) {
+            return { statusCode: 400, body: JSON.stringify({ error: "데이터가 누락되었습니다." }) };
+        }
+        
+        const content = JSON.parse(bodyStr);
+        const imgStr = content.image;
+
+        if (!imgStr) {
+            return { statusCode: 400, body: JSON.stringify({ error: "이미지 데이터가 없습니다." }) };
+        }
+
+        // Base64 디코딩 및 Jimp 인스턴스 생성
+        const imgBuffer = Buffer.from(imgStr, 'base64');
+        const image = await Jimp.read(imgBuffer);
+
+        const w = image.bitmap.width;
+        const h = image.bitmap.height;
+        const centerX = Math.floor(w / 2);
+        const centerY = Math.floor(h / 2);
+        const radius = Math.floor(Math.min(w, h) / 3);
+        const radiusSq = radius * radius;
+
+        let sumR = 0, sumG = 0, sumB = 0, count = 0;
+
+        // 원형 마스킹 내부 픽셀 평균 연산 (Numpy를 대체하는 순수 반복문)
+        image.scan(0, 0, w, h, function(x, y, idx) {
+            const dx = x - centerX;
+            const dy = y - centerY;
+            if ((dx * dx + dy * dy) <= radiusSq) {
+                sumR += this.bitmap.data[idx + 0]; // Red
+                sumG += this.bitmap.data[idx + 1]; // Green
+                sumB += this.bitmap.data[idx + 2]; // Blue
+                count++;
             }
+        });
 
-        # JSON 페이로드 파싱
-        body_str = event.get('body', '{}')
-        if not body_str:
-            return {"statusCode": 400, "body": json.dumps({"error": "데이터가 누락되었습니다."})}
-            
-        content = json.loads(body_str)
-        img_str = content.get('image')
+        if (count === 0) {
+            throw new Error("마스킹 영역(ROI) 내에 유효한 픽셀이 존재하지 않습니다.");
+        }
 
-        if not img_str:
-            return {"statusCode": 400, "body": json.dumps({"error": "이미지 데이터가 없습니다."})}
+        const avgR = sumR / count;
+        const avgG = sumG / count;
+        const avgB = sumB / count;
 
-        # Base64 이미지 디코딩 및 OpenCV 변환
-        img_bytes = base64.b64decode(img_str)
-        nparr = np.frombuffer(img_bytes, np.uint8)
-        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        // RGB 평균값을 OpenCV 기반 LAB 값으로 직렬 변환
+        const [l, a, b] = rgbToOpenCVLab(avgR, avgG, avgB);
 
-        if img is None:
-            return {"statusCode": 400, "body": json.dumps({"error": "이미지 해석 불가"})}
+        // 기준값 및 Delta E 계산 (유클리디안 거리)
+        const ref_l = 60.0, ref_a = 142.0, ref_b = 155.0; 
+        const delta_e = Math.sqrt(Math.pow(l - ref_l, 2) + Math.pow(a - ref_a, 2) + Math.pow(b - ref_b, 2));
 
-        # 핵심 로직: 마스킹 및 색차 분석
-        h, w = img.shape[:2]
-        mask = np.zeros((h, w), dtype=np.uint8)
-        cv2.circle(mask, (w // 2, h // 2), min(h, w) // 3, 255, -1)
+        let phase = "Phase 1: 신유";
+        if (delta_e >= 45.0) phase = "Phase 3: 폐유";
+        else if (delta_e >= 20.0) phase = "Phase 2: 주의";
         
-        lab_img = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
-        avg_lab = cv2.mean(lab_img, mask=mask)
-        l, a, b = avg_lab[0], avg_lab[1], avg_lab[2]
-
-        # 기준값 및 Delta E 계산
-        ref_l, ref_a, ref_b = 60.0, 142.0, 155.0 
-        delta_e = float(np.sqrt((l - ref_l)**2 + (a - ref_a)**2 + (b - ref_b)**2))
-
-        phase = "Phase 1: 신유" if delta_e < 20 else ("Phase 2: 주의" if delta_e < 45 else "Phase 3: 폐유")
-        
-        # 클라이언트 반환 규격 준수
+        // 클라이언트 반환 규격 준수 (HTTP 200)
         return {
-            "statusCode": 200,
-            "headers": {
+            statusCode: 200,
+            headers: {
                 "Content-Type": "application/json"
             },
-            "body": json.dumps({
-                "Delta_E": round(delta_e, 2),
-                "Phase": phase,
-                "Needs_Replacement": delta_e >= 45.0
+            body: JSON.stringify({
+                Delta_E: parseFloat(delta_e.toFixed(2)),
+                Phase: phase,
+                Needs_Replacement: delta_e >= 45.0
             })
-        }
-    except Exception as e:
+        };
+
+    } catch (err) {
         return {
-            "statusCode": 500,
-            "body": json.dumps({"error": str(e)})
-        }
+            statusCode: 500,
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ error: err.message })
+        };
+    }
+};
