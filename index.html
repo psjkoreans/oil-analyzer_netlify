@@ -2,7 +2,7 @@
 <html lang="ko">
 <head>
     <meta charset="UTF-8">
-    <title>Engine Oil Analyzer v2.2 (Netlify Edition)</title>
+    <title>Engine Oil Analyzer v2.2</title>
     <style>
         body { font-family: sans-serif; max-width: 500px; margin: 50px auto; padding: 20px; background: #f4f4f4; }
         .container { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
@@ -12,7 +12,7 @@
 </head>
 <body>
     <div class="container">
-        <h2>오일 열화 분석기</h2>
+        <h2>오일 열화 분석기 (Netlify 경량화 버전)</h2>
         <input type="file" id="fileInput" accept="image/*">
         <button onclick="uploadAndAnalyze()">분석 실행</button>
         <div id="status"></div>
@@ -35,7 +35,6 @@
                 const MAX_SIZE = 800;
                 let width = img.width, height = img.height;
                 
-                // 비율 유지 리사이징 알고리즘
                 if (width > height) { 
                     if (width > MAX_SIZE) { height *= MAX_SIZE / width; width = MAX_SIZE; } 
                 } else { 
@@ -44,12 +43,10 @@
                 
                 canvas.width = width; canvas.height = height;
                 canvas.getContext('2d').drawImage(img, 0, 0, width, height);
-                
-                // JPEG 압축을 통한 Base64 페이로드 최적화
                 const base64Image = canvas.toDataURL('image/jpeg', 0.8).split(',')[1];
 
                 try {
-                    // [핵심 변경 사항] Netlify Functions의 명시적 라우팅 경로 사용
+                    // Netlify 서버리스 라우팅 경로
                     const response = await fetch('/.netlify/functions/analyze', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
