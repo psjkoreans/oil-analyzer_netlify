@@ -1,17 +1,14 @@
 const Jimp = require('jimp');
 
-// [핵심 보정] RGB를 OpenCV의 8-bit LAB 규격으로 변환하는 수식
 function rgbToOpenCVLab(R, G, B) {
     let r = R / 255.0, g = G / 255.0, b = B / 255.0;
 
-    // sRGB -> Linear RGB (Gamma Correction)
     r = r > 0.04045 ? Math.pow((r + 0.055) / 1.055, 2.4) : r / 12.92;
     g = g > 0.04045 ? Math.pow((g + 0.055) / 1.055, 2.4) : g / 12.92;
     b = b > 0.04045 ? Math.pow((b + 0.055) / 1.055, 2.4) : b / 12.92;
 
     r *= 100; g *= 100; b *= 100;
 
-    // D65 Standard Illuminant 변환 (XYZ Space)
     let x = r * 0.4124 + g * 0.3576 + b * 0.1805;
     let y = r * 0.2126 + g * 0.7152 + b * 0.0722;
     let z = r * 0.0193 + g * 0.1192 + b * 0.9505;
@@ -22,12 +19,10 @@ function rgbToOpenCVLab(R, G, B) {
     y = y > 0.008856 ? Math.cbrt(y) : (7.787 * y) + (16 / 116);
     z = z > 0.008856 ? Math.cbrt(z) : (7.787 * z) + (16 / 116);
 
-    // Standard CIELAB Space
     let L = (116 * y) - 16;
     let a = 500 * (x - y);
     let b_val = 200 * (y - z);
 
-    // [중요] OpenCV 8-bit LAB Scaling 대응
     let cv_L = L * 2.55;
     let cv_a = a + 128;
     let cv_b = b_val + 128;
@@ -37,7 +32,6 @@ function rgbToOpenCVLab(R, G, B) {
 
 exports.handler = async function(event, context) {
     try {
-        // POST 메서드 검증 (HTTP 405)
         if (event.httpMethod !== 'POST') {
             return {
                 statusCode: 405,
@@ -46,20 +40,18 @@ exports.handler = async function(event, context) {
             };
         }
 
-        // JSON 페이로드 파싱
         const bodyStr = event.body || '{}';
         if (!bodyStr) {
-            return { statusCode: 400, body: JSON.stringify({ error: "데이터가 누락되었습니다." }) };
+            return { statusCode: 400, body: JSON.stringify({ error: "데이터 누락" }) };
         }
         
         const content = JSON.parse(bodyStr);
         const imgStr = content.image;
 
         if (!imgStr) {
-            return { statusCode: 400, body: JSON.stringify({ error: "이미지 데이터가 없습니다." }) };
+            return { statusCode: 400, body: JSON.stringify({ error: "이미지 데이터 없음" }) };
         }
 
-        // Base64 디코딩 및 Jimp 인스턴스 생성
         const imgBuffer = Buffer.from(imgStr, 'base64');
         const image = await Jimp.read(imgBuffer);
 
@@ -72,14 +64,13 @@ exports.handler = async function(event, context) {
 
         let sumR = 0, sumG = 0, sumB = 0, count = 0;
 
-        // 원형 마스킹 내부 픽셀 평균 연산 (Numpy를 대체하는 순수 반복문)
         image.scan(0, 0, w, h, function(x, y, idx) {
             const dx = x - centerX;
             const dy = y - centerY;
             if ((dx * dx + dy * dy) <= radiusSq) {
-                sumR += this.bitmap.data[idx + 0]; // Red
-                sumG += this.bitmap.data[idx + 1]; // Green
-                sumB += this.bitmap.data[idx + 2]; // Blue
+                sumR += this.bitmap.data[idx + 0];
+                sumG += this.bitmap.data[idx + 1];
+                sumB += this.bitmap.data[idx + 2];
                 count++;
             }
         });
@@ -92,10 +83,8 @@ exports.handler = async function(event, context) {
         const avgG = sumG / count;
         const avgB = sumB / count;
 
-        // RGB 평균값을 OpenCV 기반 LAB 값으로 직렬 변환
         const [l, a, b] = rgbToOpenCVLab(avgR, avgG, avgB);
 
-        // 기준값 및 Delta E 계산 (유클리디안 거리)
         const ref_l = 60.0, ref_a = 142.0, ref_b = 155.0; 
         const delta_e = Math.sqrt(Math.pow(l - ref_l, 2) + Math.pow(a - ref_a, 2) + Math.pow(b - ref_b, 2));
 
@@ -103,12 +92,9 @@ exports.handler = async function(event, context) {
         if (delta_e >= 45.0) phase = "Phase 3: 폐유";
         else if (delta_e >= 20.0) phase = "Phase 2: 주의";
         
-        // 클라이언트 반환 규격 준수 (HTTP 200)
         return {
             statusCode: 200,
-            headers: {
-                "Content-Type": "application/json"
-            },
+            headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
                 Delta_E: parseFloat(delta_e.toFixed(2)),
                 Phase: phase,
