@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>Engine Oil Analyzer v2.2 (Netlify Edition)</title>
+    <style>
+        body { font-family: sans-serif; max-width: 500px; margin: 50px auto; padding: 20px; background: #f4f4f4; }
+        .container { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+        #status { margin: 10px 0; font-weight: bold; color: #555; }
+        #result { margin-top: 20px; padding: 15px; border-radius: 5px; display: none; border: 1px solid #ddd; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2>오일 열화 분석기</h2>
+        <input type="file" id="fileInput" accept="image/*">
+        <button onclick="uploadAndAnalyze()">분석 실행</button>
+        <div id="status"></div>
+        <div id="result"></div>
+    </div>
+
+    <script>
+        async function uploadAndAnalyze() {
+            const file = document.getElementById('fileInput').files[0];
+            if (!file) return alert("파일을 선택하세요.");
+
+            const status = document.getElementById('status');
+            const resultDiv = document.getElementById('result');
+            status.innerText = "분석 중 (최적화 포함)...";
+
+            const img = new Image();
+            img.src = URL.createObjectURL(file);
+            img.onload = async () => {
+                const canvas = document.createElement('canvas');
+                const MAX_SIZE = 800;
+                let width = img.width, height = img.height;
+                
+                // 비율 유지 리사이징 알고리즘
+                if (width > height) { 
+                    if (width > MAX_SIZE) { height *= MAX_SIZE / width; width = MAX_SIZE; } 
+                } else { 
+                    if (height > MAX_SIZE) { width *= MAX_SIZE / height; height = MAX_SIZE; } 
+                }
+                
+                canvas.width = width; canvas.height = height;
+                canvas.getContext('2d').drawImage(img, 0, 0, width, height);
+                
+                // JPEG 압축을 통한 Base64 페이로드 최적화
+                const base64Image = canvas.toDataURL('image/jpeg', 0.8).split(',')[1];
+
+                try {
+                    // [핵심 변경 사항] Netlify Functions의 명시적 라우팅 경로 사용
+                    const response = await fetch('/.netlify/functions/analyze', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ image: base64Image })
+                    });
+
+                    const text = await response.text();
+                    let data;
+                    try { 
+                        data = JSON.parse(text); 
+                    } catch(e) { 
+                        throw new Error("서버 응답 파싱 오류: " + text.substring(0, 50)); 
+                    }
+
+                    if (!response.ok) throw new Error(data.error || "서버 통신 오류");
+
+                    resultDiv.style.display = 'block';
+                    resultDiv.innerHTML = `<strong>결과:</strong> ${data.Phase}<br><strong>색차(ΔE):</strong> ${data.Delta_E.toFixed(2)}`;
+                    status.innerText = "분석 완료";
+                } catch (err) {
+                    alert("오류 발생: " + err.message);
+                    status.innerText = "분석 실패";
+                }
+            };
+        }
+    </script>
+</body>
+</html>
