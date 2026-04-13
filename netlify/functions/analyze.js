@@ -1,112 +1,141 @@
 const Jimp = require('jimp');
 
-/**
- * 표준 CIE L*a*b* 및 OpenCV 스타일 Lab 변환 함수
- * @param {number} R, G, B (0-255)
- * @returns {Object} {cie: [L, a, b], opencv: [L, a, b]}
- */
-function getLabCoordinates(R, G, B) {
-    let r = R / 255.0, g = G / 255.0, b = B / 255.0;
-    r = r > 0.04045 ? Math.pow((r + 0.055) / 1.055, 2.4) : r / 12.92;
-    g = g > 0.04045 ? Math.pow((g + 0.055) / 1.055, 2.4) : g / 12.92;
-    b = b > 0.04045 ? Math.pow((b + 0.055) / 1.055, 2.4) : b / 12.92;
+// [모듈 1] sRGB to CIE L*a*b* 수학적 변환
+function rgbToLab(r, g, b) {
+    let r_l = r / 255.0, g_l = g / 255.0, b_l = b / 255.0;
+    r_l = (r_l > 0.04045) ? Math.pow((r_l + 0.055) / 1.055, 2.4) : r_l / 12.92;
+    g_l = (g_l > 0.04045) ? Math.pow((g_l + 0.055) / 1.055, 2.4) : g_l / 12.92;
+    b_l = (b_l > 0.04045) ? Math.pow((b_l + 0.055) / 1.055, 2.4) : b_l / 12.92;
 
-    r *= 100; g *= 100; b *= 100;
-    let x = r * 0.4124 + g * 0.3576 + b * 0.1805;
-    let y = r * 0.2126 + g * 0.7152 + b * 0.0722;
-    let z = r * 0.0193 + g * 0.1192 + b * 0.9505;
+    let x = (r_l * 0.4124 + g_l * 0.3576 + b_l * 0.1805) * 100;
+    let y = (r_l * 0.2126 + g_l * 0.7152 + b_l * 0.0722) * 100;
+    let z = (r_l * 0.0193 + g_l * 0.1192 + b_l * 0.9505) * 100;
 
     x /= 95.047; y /= 100.000; z /= 108.883;
-    x = x > 0.008856 ? Math.cbrt(x) : (7.787 * x) + (16 / 116);
-    y = y > 0.008856 ? Math.cbrt(y) : (7.787 * y) + (16 / 116);
-    z = z > 0.008856 ? Math.cbrt(z) : (7.787 * z) + (16 / 116);
 
-    const L_cie = (116 * y) - 16;
-    const a_cie = 500 * (x - y);
-    const b_cie = 200 * (y - z);
+    x = (x > 0.008856) ? Math.pow(x, 1/3) : (7.787 * x) + (16 / 116);
+    y = (y > 0.008856) ? Math.pow(y, 1/3) : (7.787 * y) + (16 / 116);
+    z = (z > 0.008856) ? Math.pow(z, 1/3) : (7.787 * z) + (16 / 116);
 
-    return {
-        cie: [L_cie, a_cie, b_cie],
-        opencv: [L_cie * 2.55, a_cie + 128, b_cie + 128]
-    };
+    const L = (116 * y) - 16;
+    const a = 500 * (x - y);
+    const b = 200 * (y - z);
+    return { L, a, b };
 }
 
-// 비교를 위한 기존 저장 데이터 (Reference Dataset)
-// 실제 운영 시에는 DB나 JSON 파일에서 로드하도록 확장 가능
-const HISTORICAL_DATA = [
-    { mileage: 0, l: 75.2, a: -1.2, b: 12.5, phase: "Phase 1: 신유" },
-    { mileage: 3000, l: 62.5, a: 5.4, b: 28.1, phase: "Phase 1: 초기 열화" },
-    { mileage: 7000, l: 45.1, a: 12.3, b: 35.4, phase: "Phase 2: 주의" },
-    { mileage: 12000, l: 22.8, a: 8.1, b: 15.2, phase: "Phase 3: 폐유" },
-    { mileage: 15000, l: 12.4, a: 3.2, b: 5.1, phase: "Phase 3: 폐유" }
-];
+// [모듈 2] 이미지 기반 평균 LAB 추출 (Otsu 분리 생략, 중심부 관심영역(ROI) 기반 경량화 처리)
+async function extractLabFromBase64(base64Str) {
+    // base64 헤더 제거 처리
+    const base64Data = base64Str.replace(/^data:image\/\w+;base64,/, "");
+    const buffer = Buffer.from(base64Data, 'base64');
+    const image = await Jimp.read(buffer);
+    
+    // 중앙 50% 영역의 평균 색상 추출 (서버리스 최적화)
+    const w = image.bitmap.width;
+    const h = image.bitmap.height;
+    const startX = Math.floor(w * 0.25), startY = Math.floor(h * 0.25);
+    const roiW = Math.floor(w * 0.5), roiH = Math.floor(h * 0.5);
 
+    let totalR = 0, totalG = 0, totalB = 0;
+    let count = 0;
+
+    image.scan(startX, startY, roiW, roiH, function (x, y, idx) {
+        totalR += this.bitmap.data[idx + 0];
+        totalG += this.bitmap.data[idx + 1];
+        totalB += this.bitmap.data[idx + 2];
+        count++;
+    });
+
+    return rgbToLab(totalR / count, totalG / count, totalB / count);
+}
+
+// [모듈 3] Netlify Serverless Handler
 exports.handler = async function(event, context) {
+    if (event.httpMethod !== 'POST') {
+        return { statusCode: 405, body: 'Method Not Allowed' };
+    }
+
     try {
-        if (event.httpMethod !== 'POST') {
-            return { statusCode: 405, body: JSON.stringify({ error: "Method Not Allowed" }) };
+        const payload = JSON.parse(event.body); 
+        // Expected payload: [ { mileage: 0, imageBase64: "..." }, { mileage: 5000, imageBase64: "..." } ]
+        
+        if (!Array.isArray(payload) || payload.length === 0) {
+            throw new Error("Payload must be a non-empty array of objects with mileage and imageBase64.");
         }
 
-        const { image: imgStr } = JSON.parse(event.body || '{}');
-        if (!imgStr) return { statusCode: 400, body: JSON.stringify({ error: "이미지 데이터 없음" }) };
+        // 마일리지 기준 정렬
+        payload.sort((a, b) => a.mileage - b.mileage);
 
-        const image = await Jimp.read(Buffer.from(imgStr, 'base64'));
-        const { width: w, height: h } = image.bitmap;
-        const centerX = w / 2, centerY = h / 2;
-        const radiusSq = Math.pow(Math.min(w, h) / 3, 2);
+        // 비동기 이미지 처리
+        const labResults = await Promise.all(payload.map(async (item) => {
+            const lab = await extractLabFromBase64(item.imageBase64);
+            return { mileage: item.mileage, ...lab };
+        }));
 
-        let sumR = 0, sumG = 0, sumB = 0, count = 0;
+        let L_0 = labResults[0].L;
+        let cumulativeArcLength = 0;
+        let previousPoint = null;
 
-        image.scan(0, 0, w, h, function(x, y, idx) {
-            if (Math.pow(x - centerX, 2) + Math.pow(y - centerY, 2) <= radiusSq) {
-                sumR += this.bitmap.data[idx + 0];
-                sumG += this.bitmap.data[idx + 1];
-                sumB += this.bitmap.data[idx + 2];
-                count++;
+        const evaluatedData = labResults.map((row, index) => {
+            // 아키텍처 1: 조건부 위상 게이팅
+            let phase = '';
+            let colorCode = '';
+            if (row.L >= 60.0) {
+                if (Math.abs(row.a) < 5.0 && Math.abs(row.b) < 15.0) {
+                    phase = 'Phase 1: 신유 (Fresh)'; colorCode = '#0000FF'; // Blue
+                } else {
+                    phase = 'Phase 1: 초기 열화 (Early Oxidation)'; colorCode = '#00FFFF'; // Cyan
+                }
+            } else if (row.L >= 30.0) {
+                phase = 'Phase 2: 중기 위험 (Critical Danger)'; colorCode = '#FFA500'; // Orange
+            } else {
+                phase = 'Phase 3: 칠흑색 폐유 (Terminal Sludge)'; colorCode = '#FF0000'; // Red
             }
-        });
 
-        if (count === 0) throw new Error("ROI 내 유효 픽셀 없음");
+            // 아키텍처 2: 가중치 감쇠 다항식 (오염도 지표로 활용)
+            const decayFunction = row.L / 100.0;
+            const decayWeightedDI = 1.0 * (L_0 - row.L) + decayFunction * (Math.abs(row.a) + Math.abs(row.b));
 
-        // 1. 현재 샘플 특성 추출
-        const labs = getLabCoordinates(sumR / count, sumG / count, sumB / count);
-        const [curL, curA, curB] = labs.cie;
-        
-        // 2. 아키텍처 기반 계산 (열화 지수 및 거리)
-        const L_0 = HISTORICAL_DATA[0].l; // 신유 기준점
-        const decayDI = (1.0 * (L_0 - curL)) + (curL / 100.0) * (Math.abs(curA) + Math.abs(curB));
-        const trajectoryDist = Math.sqrt(Math.pow(curL - L_0, 2) + Math.pow(curA - HISTORICAL_DATA[0].a, 2) + Math.pow(curB - HISTORICAL_DATA[0].b, 2));
+            // 아키텍처 3: 기준 궤적 투영법
+            if (previousPoint) {
+                const dist = Math.sqrt(
+                    Math.pow(row.L - previousPoint.L, 2) +
+                    Math.pow(row.a - previousPoint.a, 2) +
+                    Math.pow(row.b - previousPoint.b, 2)
+                );
+                cumulativeArcLength += dist;
+            }
+            previousPoint = { L: row.L, a: row.a, b: row.b };
 
-        // 3. Phase 판정 로직 (Ensemble)
-        let phase = "Phase 1: 신유";
-        if (curL < 30.0 || trajectoryDist > 80.0) phase = "Phase 3: 폐유";
-        else if (curL < 55.0 || trajectoryDist > 40.0) phase = "Phase 2: 주의";
+            // 앙상블 판정 로직
+            const condA = phase === 'Phase 3: 칠흑색 폐유 (Terminal Sludge)';
+            const condB = cumulativeArcLength >= 100.0;
+            const needsReplacement = condA || condB;
 
-        // 4. 시각화용 통합 데이터 구성
-        const responseData = {
-            current_sample: {
-                l: parseFloat(curL.toFixed(2)),
-                a: parseFloat(curA.toFixed(2)),
-                b: parseFloat(curB.toFixed(2)),
-                di: parseFloat(decayDI.toFixed(2)),
-                distance: parseFloat(trajectoryDist.toFixed(2)),
+            // 교체 필요 시 시각적 강조를 위한 특수 마커 색상 배정
+            const finalColor = needsReplacement ? '#8B0000' : colorCode; // Dark Red for replacement
+
+            return {
+                x: row.mileage,                     // x축: 마일리지
+                y: decayWeightedDI,                 // y축: 오염도 (Calculated DI)
+                L_CIE: row.L,
                 phase: phase,
-                needs_replacement: curL < 30.0 || trajectoryDist > 80.0
-            },
-            historical_dataset: HISTORICAL_DATA, // 웹에서 그래프를 그리기 위한 데이터
-            metadata: {
-                timestamp: new Date().toISOString(),
-                status: "success"
-            }
-        };
+                arcLength: cumulativeArcLength,
+                needsReplacement: needsReplacement, // 프론트엔드에서 이중 원(Highlight)을 그리기 위한 Boolean
+                pointColor: finalColor              // 각 데이터의 색상
+            };
+        });
 
         return {
             statusCode: 200,
-            headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
-            body: JSON.stringify(responseData)
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ 
+                success: true, 
+                data: evaluatedData 
+            })
         };
 
-    } catch (err) {
-        return { statusCode: 500, body: JSON.stringify({ error: err.message }) };
+    } catch (error) {
+        return { statusCode: 500, body: JSON.stringify({ error: error.message }) };
     }
-};
+}
