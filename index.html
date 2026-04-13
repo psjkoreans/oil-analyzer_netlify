@@ -40,6 +40,27 @@
     <div id="analysisReport" class="report-box" style="display: none;"></div>
 
     <script>
+    // [모듈 1] 시스템 초기화 데이터 (Seed Data)
+    // 향후 r, g, b 값이 확보되면 아래 객체에 속성을 추가한다.
+    const HISTORICAL_SEED_DATA = [
+        // sample_data_1
+        { filename: '9115.jpg', mileage: 180294, r: 45, g: 30, b: 20 }, // r,g,b는 예시 값
+        { filename: '9122.jpg', mileage: 108537, r: 50, g: 35, b: 22 },
+        { filename: '9123.jpg', mileage: 101100, r: 52, g: 38, b: 25 },
+        { filename: '9133.jpg', mileage: 36982,  r: 80, g: 60, b: 40 },
+        { filename: '9134.jpg', mileage: 32600,  r: 85, g: 62, b: 45 },
+        { filename: '9135.jpg', mileage: 34789,  r: 82, g: 61, b: 42 },
+        { filename: '9136.jpg', mileage: 25647,  r: 100, g: 80, b: 50 },
+        { filename: '9137.jpg', mileage: 25112,  r: 105, g: 82, b: 55 },
+        { filename: '9138.jpg', mileage: 23767,  r: 110, g: 85, b: 60 },
+        { filename: '9139.jpg', mileage: 25623,  r: 108, g: 84, b: 58 },
+        { filename: '9141.jpg', mileage: 5424,   r: 150, g: 120, b: 80 },
+        // sample_data_3
+        { filename: '7557-30.jpg', mileage: 1221,  r: 200, g: 180, b: 120 },
+        { filename: '7557-78.jpg', mileage: 78290, r: 60,  g: 45,  b: 30 }
+    ];
+        
+    <script>
         // 클라이언트 측 데이터 누적을 위한 상태 변수
         let historicalPayload = [];
         let chartInstances = {};
