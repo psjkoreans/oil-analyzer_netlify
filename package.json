@@ -1,0 +1,9 @@
+{
+  "name": "engine-oil-analyzer",
+  "version": "2.2.0",
+  "description": "Serverless Engine Oil Degradation Analyzer",
+  "main": "index.html",
+  "dependencies": {
+    "jimp": "^0.22.10"
+  }
+}
