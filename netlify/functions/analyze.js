@@ -1,6 +1,5 @@
 const Jimp = require('jimp');
 
-// [모듈 1] sRGB to CIE L*a*b* 수학적 변환
 function rgbToLab(r, g, b) {
     let r_l = r / 255.0, g_l = g / 255.0, b_l = b / 255.0;
     r_l = (r_l > 0.04045) ? Math.pow((r_l + 0.055) / 1.055, 2.4) : r_l / 12.92;
@@ -17,27 +16,20 @@ function rgbToLab(r, g, b) {
     y = (y > 0.008856) ? Math.pow(y, 1/3) : (7.787 * y) + (16 / 116);
     z = (z > 0.008856) ? Math.pow(z, 1/3) : (7.787 * z) + (16 / 116);
 
-    const L = (116 * y) - 16;
-    const a = 500 * (x - y);
-    const b = 200 * (y - z);
-    return { L, a, b };
+    return { L: (116 * y) - 16, a: 500 * (x - y), b: 200 * (y - z) };
 }
 
-// [모듈 2] 이미지 기반 평균 LAB 추출 (Otsu 분리 생략, 중심부 관심영역(ROI) 기반 경량화 처리)
 async function extractLabFromBase64(base64Str) {
-    // base64 헤더 제거 처리
     const base64Data = base64Str.replace(/^data:image\/\w+;base64,/, "");
     const buffer = Buffer.from(base64Data, 'base64');
     const image = await Jimp.read(buffer);
     
-    // 중앙 50% 영역의 평균 색상 추출 (서버리스 최적화)
     const w = image.bitmap.width;
     const h = image.bitmap.height;
     const startX = Math.floor(w * 0.25), startY = Math.floor(h * 0.25);
     const roiW = Math.floor(w * 0.5), roiH = Math.floor(h * 0.5);
 
-    let totalR = 0, totalG = 0, totalB = 0;
-    let count = 0;
+    let totalR = 0, totalG = 0, totalB = 0, count = 0;
 
     image.scan(startX, startY, roiW, roiH, function (x, y, idx) {
         totalR += this.bitmap.data[idx + 0];
@@ -49,90 +41,69 @@ async function extractLabFromBase64(base64Str) {
     return rgbToLab(totalR / count, totalG / count, totalB / count);
 }
 
-// [모듈 3] Netlify Serverless Handler
 exports.handler = async function(event, context) {
-    if (event.httpMethod !== 'POST') {
-        return { statusCode: 405, body: 'Method Not Allowed' };
-    }
+    if (event.httpMethod !== 'POST') return { statusCode: 405, body: 'Method Not Allowed' };
 
     try {
         const payload = JSON.parse(event.body); 
-        // Expected payload: [ { mileage: 0, imageBase64: "..." }, { mileage: 5000, imageBase64: "..." } ]
         
         if (!Array.isArray(payload) || payload.length === 0) {
             throw new Error("Payload must be a non-empty array of objects with mileage and imageBase64.");
         }
 
-        // 마일리지 기준 정렬
         payload.sort((a, b) => a.mileage - b.mileage);
 
-        // 비동기 이미지 처리
-        const labResults = await Promise.all(payload.map(async (item) => {
+        // 프론트엔드의 isNew 플래그를 유지하며 처리
+        const labResults = [];
+        for (const item of payload) {
             const lab = await extractLabFromBase64(item.imageBase64);
-            return { mileage: item.mileage, ...lab };
-        }));
+            labResults.push({ mileage: item.mileage, isNew: item.isNew, ...lab });
+        }
 
         let L_0 = labResults[0].L;
         let cumulativeArcLength = 0;
         let previousPoint = null;
 
-        const evaluatedData = labResults.map((row, index) => {
-            // 아키텍처 1: 조건부 위상 게이팅
-            let phase = '';
-            let colorCode = '';
+        const evaluatedData = labResults.map((row) => {
+            let phase = '', colorCode = '';
+            
             if (row.L >= 60.0) {
-                if (Math.abs(row.a) < 5.0 && Math.abs(row.b) < 15.0) {
-                    phase = 'Phase 1: 신유 (Fresh)'; colorCode = '#0000FF'; // Blue
-                } else {
-                    phase = 'Phase 1: 초기 열화 (Early Oxidation)'; colorCode = '#00FFFF'; // Cyan
-                }
-            } else if (row.L >= 30.0) {
-                phase = 'Phase 2: 중기 위험 (Critical Danger)'; colorCode = '#FFA500'; // Orange
-            } else {
-                phase = 'Phase 3: 칠흑색 폐유 (Terminal Sludge)'; colorCode = '#FF0000'; // Red
-            }
+                if (Math.abs(row.a) < 5.0 && Math.abs(row.b) < 15.0) { phase = 'Phase 1: 신유 (Fresh)'; colorCode = '#0000FF'; }
+                else { phase = 'Phase 1: 초기 열화 (Early Oxidation)'; colorCode = '#00FFFF'; }
+            } else if (row.L >= 30.0) { phase = 'Phase 2: 중기 위험 (Critical Danger)'; colorCode = '#FFA500'; }
+            else { phase = 'Phase 3: 칠흑색 폐유 (Terminal Sludge)'; colorCode = '#FF0000'; }
 
-            // 아키텍처 2: 가중치 감쇠 다항식 (오염도 지표로 활용)
             const decayFunction = row.L / 100.0;
             const decayWeightedDI = 1.0 * (L_0 - row.L) + decayFunction * (Math.abs(row.a) + Math.abs(row.b));
 
-            // 아키텍처 3: 기준 궤적 투영법
             if (previousPoint) {
-                const dist = Math.sqrt(
-                    Math.pow(row.L - previousPoint.L, 2) +
-                    Math.pow(row.a - previousPoint.a, 2) +
-                    Math.pow(row.b - previousPoint.b, 2)
+                cumulativeArcLength += Math.sqrt(
+                    Math.pow(row.L - previousPoint.L, 2) + Math.pow(row.a - previousPoint.a, 2) + Math.pow(row.b - previousPoint.b, 2)
                 );
-                cumulativeArcLength += dist;
             }
             previousPoint = { L: row.L, a: row.a, b: row.b };
 
-            // 앙상블 판정 로직
-            const condA = phase === 'Phase 3: 칠흑색 폐유 (Terminal Sludge)';
-            const condB = cumulativeArcLength >= 100.0;
-            const needsReplacement = condA || condB;
+            const needsReplacement = (phase === 'Phase 3: 칠흑색 폐유 (Terminal Sludge)') || (cumulativeArcLength >= 100.0);
 
-            // 교체 필요 시 시각적 강조를 위한 특수 마커 색상 배정
-            const finalColor = needsReplacement ? '#8B0000' : colorCode; // Dark Red for replacement
-
+            // 클라이언트 사이드 시각화를 위한 변수 일체 반환
             return {
-                x: row.mileage,                     // x축: 마일리지
-                y: decayWeightedDI,                 // y축: 오염도 (Calculated DI)
-                L_CIE: row.L,
+                x: row.mileage,
+                y: decayWeightedDI,
+                L: row.L,
+                a: row.a,
+                b: row.b,
                 phase: phase,
                 arcLength: cumulativeArcLength,
-                needsReplacement: needsReplacement, // 프론트엔드에서 이중 원(Highlight)을 그리기 위한 Boolean
-                pointColor: finalColor              // 각 데이터의 색상
+                needsReplacement: needsReplacement,
+                pointColor: needsReplacement ? '#8B0000' : colorCode,
+                isNew: row.isNew || false
             };
         });
 
         return {
             statusCode: 200,
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ 
-                success: true, 
-                data: evaluatedData 
-            })
+            body: JSON.stringify({ success: true, data: evaluatedData })
         };
 
     } catch (error) {
