@@ -24,7 +24,6 @@ function rgbToLab(r, g, b) {
 }
 
 exports.handler = async function(event, context) {
-    // 1. HTTP 메서드 통제
     if (event.httpMethod !== 'POST') {
         return { statusCode: 405, body: 'Method Not Allowed' };
     }
@@ -32,7 +31,7 @@ exports.handler = async function(event, context) {
     try {
         const payload = JSON.parse(event.body); 
         
-        // 2. 페이로드 구조적 무결성 검증 (Defensive Programming)
+        // 페이로드 구조적 무결성 검증
         if (!Array.isArray(payload) || payload.length === 0) {
             throw new Error("Payload must be a non-empty array of objects.");
         }
@@ -45,72 +44,90 @@ exports.handler = async function(event, context) {
         );
 
         if (!isValid) {
-            throw new Error("Invalid payload structure: missing required numerical fields (mileage, r, g, b).");
+            throw new Error("Invalid payload structure: missing required numerical fields.");
         }
 
-        // 3. 시계열 궤적 분석을 위한 주행거리 오름차순 정렬
+        // 시계열 궤적 분석을 위한 주행거리 오름차순 정렬
         payload.sort((a, b) => a.mileage - b.mileage);
 
-        // 4. 의존성 없는 독자적 데이터 융합 (Jimp 제거 및 클라이언트 RGB 수용)
-        const labResults = [];
-        for (const item of payload) {
-            const lab = rgbToLab(item.r, item.g, item.b);
-            labResults.push({ mileage: item.mileage, isNew: item.isNew || false, ...lab });
-        }
+        // L*a*b* 공간 변환
+        const labResults = payload.map(item => ({
+            mileage: item.mileage,
+            isNew: item.isNew || false,
+            ...rgbToLab(item.r, item.g, item.b)
+        }));
 
-        let L_0 = labResults[0].L;
-        let cumulativeArcLength = 0;
-        let previousPoint = null;
+        // 기준점(Reference) 설정: 배열의 첫 번째 값(가장 낮은 주행거리)을 신유 상태로 간주
+        const ref_L = labResults[0].L;
+        const ref_a = labResults[0].a;
+        const ref_b = labResults[0].b;
 
-        // 5. 다차원 오염도(Degradation Index) 및 임계점 수학적 적분
-        const evaluatedData = labResults.map((row) => {
-            let phase = '', colorCode = '';
-            
-            // 명도 기준 위상 정의
-            if (row.L >= 60.0) {
-                if (Math.abs(row.a) < 5.0 && Math.abs(row.b) < 15.0) { 
-                    phase = 'Phase 1: 신유 (Fresh)'; colorCode = '#0000FF'; 
-                } else { 
-                    phase = 'Phase 1: 초기 열화 (Early Oxidation)'; colorCode = '#00FFFF'; 
+        let isSaturated = false;
+        let saturatedRawDI = null;
+
+        // Pass 1: 유클리디안 색차(Delta E) 산출 및 포화 임계점 기반 절사(Clipping)
+        const rawData = labResults.map((row) => {
+            let currentPhase = '';
+            let rawDeltaE = Math.sqrt(
+                Math.pow(row.L - ref_L, 2) + 
+                Math.pow(row.a - ref_a, 2) + 
+                Math.pow(row.b - ref_b, 2)
+            );
+
+            // 포화 임계점 검증 (L* < 30.0)
+            if (isSaturated || row.L < 30.0) {
+                isSaturated = true;
+                currentPhase = 'Phase 4: 교체 요망 (Replacement Required - Saturated)';
+                
+                // 데이터 절사: 포화 이후의 노이즈성 Delta E 변동을 무시하고 값을 동결
+                if (saturatedRawDI === null) {
+                    saturatedRawDI = rawDeltaE; 
                 }
-            } else if (row.L >= 30.0) { 
-                phase = 'Phase 2: 중기 위험 (Critical Danger)'; colorCode = '#FFA500'; 
-            } else { 
-                phase = 'Phase 3: 칠흑색 폐유 (Terminal Sludge)'; colorCode = '#FF0000'; 
+                rawDeltaE = saturatedRawDI; 
+            } else if (rawDeltaE < 15.0) {
+                currentPhase = 'Phase 1: 신유 및 초기 (Normal)';
+            } else {
+                currentPhase = 'Phase 2/3: 열화 진행 중 (Degradation in Progress)';
             }
 
-            // 동적 감쇠 가중치(Decay Weighted) 텐서 연산
-            const decayFunction = row.L / 100.0;
-            const decayWeightedDI = 1.0 * (L_0 - row.L) + decayFunction * (Math.abs(row.a) + Math.abs(row.b));
+            return { ...row, rawDI: rawDeltaE, phase: currentPhase };
+        });
 
-            // 유클리드 공간 내 누적 궤적 거리 산출
-            if (previousPoint) {
-                cumulativeArcLength += Math.sqrt(
-                    Math.pow(row.L - previousPoint.L, 2) + 
-                    Math.pow(row.a - previousPoint.a, 2) + 
-                    Math.pow(row.b - previousPoint.b, 2)
-                );
+        // Pass 2: 시계열 데이터 평활화 (Exponential Moving Average)
+        const smoothingFactor = 0.5; // 알파(alpha) 값: 낮을수록 과거 데이터에 의존(평활도 증가)
+        let smoothedDI = rawData[0].rawDI;
+
+        const evaluatedData = rawData.map((row, index) => {
+            if (index === 0) {
+                smoothedDI = row.rawDI;
+            } else {
+                // EMA 수식: S_t = \alpha * Y_t + (1 - \alpha) * S_{t-1}
+                smoothedDI = (smoothingFactor * row.rawDI) + ((1 - smoothingFactor) * smoothedDI);
             }
-            previousPoint = { L: row.L, a: row.a, b: row.b };
 
-            // 한계 돌파 검증 논리
-            const needsReplacement = (phase === 'Phase 3: 칠흑색 폐유 (Terminal Sludge)') || (cumulativeArcLength >= 100.0);
+            // Delta E 45.0을 물리적 한계점(Tolerance Limit)으로 설정
+            const needsReplacement = row.phase.includes('Phase 4') || smoothedDI >= 45.0;
+
+            let colorCode = '#0000FF'; // Phase 1
+            if (needsReplacement) {
+                colorCode = '#8B0000'; // Dark Red for Phase 4 / Replacement
+            } else if (row.phase.includes('Phase 2/3')) {
+                colorCode = '#FFA500'; // Orange for Phase 2/3
+            }
 
             return {
                 x: row.mileage,
-                y: decayWeightedDI,
+                y: parseFloat(smoothedDI.toFixed(2)), // 노이즈가 제거된 최종 종합 오염도(DI)
                 L: row.L,
                 a: row.a,
                 b: row.b,
-                phase: phase,
-                arcLength: cumulativeArcLength,
+                phase: row.phase,
                 needsReplacement: needsReplacement,
-                pointColor: needsReplacement ? '#8B0000' : colorCode,
+                pointColor: colorCode,
                 isNew: row.isNew
             };
         });
 
-        // 6. 정상 응답 직렬화
         return {
             statusCode: 200,
             headers: { 'Content-Type': 'application/json' },
@@ -118,7 +135,6 @@ exports.handler = async function(event, context) {
         };
 
     } catch (error) {
-        // 7. 명시적 클라이언트 오류 응답 (HTTP 400 Bad Request)
         return { 
             statusCode: 400, 
             body: JSON.stringify({ error: error.message }) 
