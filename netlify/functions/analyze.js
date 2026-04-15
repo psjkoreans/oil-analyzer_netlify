@@ -1,8 +1,7 @@
 // netlify/functions/analyze.js
 
 /**
- * sRGB 색공간을 CIE L*a*b* 색공간으로 변환하는 수리적 함수
- * D65 표준 광원을 기준으로 비선형 보정(Gamma Correction) 수행
+ * sRGB -> CIE L*a*b* 변환 함수 (D65 광원 기준)
  */
 function rgbToLab(r, g, b) {
     let r_l = r / 255.0, g_l = g / 255.0, b_l = b / 255.0;
@@ -23,121 +22,111 @@ function rgbToLab(r, g, b) {
     return { L: (116 * y) - 16, a: 500 * (x - y), b: 200 * (y - z) };
 }
 
-exports.handler = async function(event, context) {
-    if (event.httpMethod !== 'POST') {
-        return { statusCode: 405, body: 'Method Not Allowed' };
+/**
+ * 멱법(Power Iteration)을 이용한 제1주성분(PC1) 추출
+ * 데이터의 공분산 행렬에서 가장 지배적인 고유벡터를 계산합니다.
+ */
+function getPC1Vector(matrix) {
+    const n = matrix.length;
+    const dims = 3; // L, a, b
+    
+    // 1. 중심화 (Mean Centering)
+    let mean = [0, 0, 0];
+    matrix.forEach(row => { row.forEach((v, i) => mean[i] += v / n); });
+    let centered = matrix.map(row => row.map((v, i) => v - mean[i]));
+
+    // 2. 공분산 행렬 계산
+    let cov = Array(dims).fill(0).map(() => Array(dims).fill(0));
+    for (let i = 0; i < dims; i++) {
+        for (let j = 0; j < dims; j++) {
+            for (let k = 0; k < n; k++) {
+                cov[i][j] += (centered[k][i] * centered[k][j]) / (n - 1);
+            }
+        }
     }
 
+    // 3. 멱법으로 고유벡터 추출
+    let v = [1, 1, 1]; // 초기 추측값
+    for (let iter = 0; iter < 15; iter++) {
+        let nextV = [0, 0, 0];
+        for (let i = 0; i < dims; i++) {
+            for (let j = 0; j < dims; j++) {
+                nextV[i] += cov[i][j] * v[j];
+            }
+        }
+        let norm = Math.sqrt(nextV.reduce((sum, val) => sum + val * val, 0));
+        v = nextV.map(val => val / norm);
+    }
+
+    // 물리적 제약: 오일 열화는 명도(L*)의 감소를 동반해야 함. 
+    // 만약 L* 성분이 양수라면 벡터의 방향을 반전시킴.
+    if (v[0] > 0) v = v.map(val => -val);
+    
+    return v;
+}
+
+exports.handler = async function(event, context) {
+    if (event.httpMethod !== 'POST') return { statusCode: 405, body: 'Method Not Allowed' };
+
     try {
-        const payload = JSON.parse(event.body); 
-        
-        // 페이로드 구조적 무결성 검증
-        if (!Array.isArray(payload) || payload.length === 0) {
-            throw new Error("Payload must be a non-empty array of objects.");
-        }
-
-        const isValid = payload.every(item => 
-            typeof item.mileage === 'number' &&
-            typeof item.r === 'number' &&
-            typeof item.g === 'number' &&
-            typeof item.b === 'number'
-        );
-
-        if (!isValid) {
-            throw new Error("Invalid payload structure: missing required numerical fields.");
-        }
-
-        // 시계열 궤적 분석을 위한 주행거리 오름차순 정렬
+        const payload = JSON.parse(event.body);
         payload.sort((a, b) => a.mileage - b.mileage);
 
-        // L*a*b* 공간 변환
+        // Lab 변환 및 데이터 준비
         const labResults = payload.map(item => ({
             mileage: item.mileage,
             isNew: item.isNew || false,
             ...rgbToLab(item.r, item.g, item.b)
         }));
 
-        // 기준점(Reference) 설정: 배열의 첫 번째 값(가장 낮은 주행거리)을 신유 상태로 간주
-        const ref_L = labResults[0].L;
-        const ref_a = labResults[0].a;
-        const ref_b = labResults[0].b;
+        // 대칭적 파이프라인: 모든 데이터(신유 포함)에 대해 PCA 벡터 산출
+        const dataMatrix = labResults.map(d => [d.L, d.a, d.b]);
+        const pc1 = getPC1Vector(dataMatrix);
 
-        let isSaturated = false;
-        let saturatedRawDI = null;
+        // 기준점(Reference) 설정
+        const ref = labResults[0];
 
-        // Pass 1: 유클리디안 색차(Delta E) 산출 및 포화 임계점 기반 절사(Clipping)
-        const rawData = labResults.map((row) => {
-            let currentPhase = '';
-            let rawDeltaE = Math.sqrt(
-                Math.pow(row.L - ref_L, 2) + 
-                Math.pow(row.a - ref_a, 2) + 
-                Math.pow(row.b - ref_b, 2)
-            );
+        const evaluatedData = labResults.map((row) => {
+            // 방향성 오염도 계산: (현재 샘플 - 기준점) 벡터를 PC1에 투영
+            const diffVector = [row.L - ref.L, row.a - ref.a, row.b - ref.b];
+            let directionalDI = diffVector[0] * pc1[0] + diffVector[1] * pc1[1] + diffVector[2] * pc1[2];
+            
+            // 물리적 비가역성: 오염도는 감소할 수 없음 (역방향 투영 차단)
+            directionalDI = Math.max(0, directionalDI);
 
-            // 포화 임계점 검증 (L* < 30.0)
-            if (isSaturated || row.L < 30.0) {
-                isSaturated = true;
-                currentPhase = 'Phase 4: 교체 요망 (Replacement Required - Saturated)';
-                
-                // 데이터 절사: 포화 이후의 노이즈성 Delta E 변동을 무시하고 값을 동결
-                if (saturatedRawDI === null) {
-                    saturatedRawDI = rawDeltaE; 
-                }
-                rawDeltaE = saturatedRawDI; 
-            } else if (rawDeltaE < 15.0) {
-                currentPhase = 'Phase 1: 신유 및 초기 (Normal)';
+            let phase = '';
+            const isSaturated = row.L < 30.0;
+            
+            if (isSaturated || directionalDI > 45.0) {
+                phase = 'Phase 4: 교체 요망 (Limit Reached)';
+            } else if (directionalDI < 12.0) {
+                phase = 'Phase 1: 양호 (Stable)';
             } else {
-                currentPhase = 'Phase 2/3: 열화 진행 중 (Degradation in Progress)';
-            }
-
-            return { ...row, rawDI: rawDeltaE, phase: currentPhase };
-        });
-
-        // Pass 2: 시계열 데이터 평활화 (Exponential Moving Average)
-        const smoothingFactor = 0.5; // 알파(alpha) 값: 낮을수록 과거 데이터에 의존(평활도 증가)
-        let smoothedDI = rawData[0].rawDI;
-
-        const evaluatedData = rawData.map((row, index) => {
-            if (index === 0) {
-                smoothedDI = row.rawDI;
-            } else {
-                // EMA 수식: S_t = \alpha * Y_t + (1 - \alpha) * S_{t-1}
-                smoothedDI = (smoothingFactor * row.rawDI) + ((1 - smoothingFactor) * smoothedDI);
-            }
-
-            // Delta E 45.0을 물리적 한계점(Tolerance Limit)으로 설정
-            const needsReplacement = row.phase.includes('Phase 4') || smoothedDI >= 45.0;
-
-            let colorCode = '#0000FF'; // Phase 1
-            if (needsReplacement) {
-                colorCode = '#8B0000'; // Dark Red for Phase 4 / Replacement
-            } else if (row.phase.includes('Phase 2/3')) {
-                colorCode = '#FFA500'; // Orange for Phase 2/3
+                phase = 'Phase 2/3: 열화 진행 (Degrading)';
             }
 
             return {
                 x: row.mileage,
-                y: parseFloat(smoothedDI.toFixed(2)), // 노이즈가 제거된 최종 종합 오염도(DI)
-                L: row.L,
-                a: row.a,
-                b: row.b,
-                phase: row.phase,
-                needsReplacement: needsReplacement,
-                pointColor: colorCode,
+                y: parseFloat(directionalDI.toFixed(2)),
+                L: parseFloat(row.L.toFixed(2)),
+                a: parseFloat(row.a.toFixed(2)),
+                b: parseFloat(row.b.toFixed(2)),
+                phase: phase,
+                needsReplacement: isSaturated || directionalDI > 45.0,
+                pointColor: isSaturated ? '#8B0000' : (directionalDI > 12.0 ? '#FFA500' : '#0000FF'),
                 isNew: row.isNew
             };
         });
 
         return {
             statusCode: 200,
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ success: true, data: evaluatedData })
+            headers: { 
+                'Content-Type': 'application/json',
+                'Access-Control-Allow-Origin': '*' // CORS 지원
+            },
+            body: JSON.stringify({ success: true, data: evaluatedData, vector: pc1 })
         };
-
     } catch (error) {
-        return { 
-            statusCode: 400, 
-            body: JSON.stringify({ error: error.message }) 
-        };
+        return { statusCode: 400, body: JSON.stringify({ error: error.message }) };
     }
-}
+};
