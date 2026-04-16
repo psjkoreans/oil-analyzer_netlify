@@ -40,6 +40,9 @@
     <div id="analysisReport" class="report-box" style="display: none;"></div>
 
     <script>
+        // ==========================================
+        // [모듈 1] 시스템 초기화 데이터 (Historical Seed Data)
+        // ==========================================
         const HISTORICAL_SEED_DATA = [
             {"mileage": 0, "r": 173, "g": 184, "b": 172},
             {"mileage": 0, "r": 175, "g": 184, "b": 179},
@@ -58,6 +61,9 @@
 
         let chartInstances = {};
 
+        // ==========================================
+        // [모듈 2] 클라이언트 측 이미지 연산 (Edge Computing)
+        // ==========================================
         function extractRGBFromImage(file) {
             return new Promise((resolve, reject) => {
                 const reader = new FileReader();
@@ -70,6 +76,7 @@
                         canvas.height = img.height;
                         ctx.drawImage(img, 0, 0);
 
+                        // 중심 50% 영역 (ROI) 설정
                         const startX = Math.floor(img.width * 0.25);
                         const startY = Math.floor(img.height * 0.25);
                         const roiW = Math.floor(img.width * 0.5);
@@ -79,6 +86,7 @@
                         const data = imageData.data;
                         let r = 0, g = 0, b = 0, count = 0;
 
+                        // 픽셀 스캔 및 누적
                         for (let i = 0; i < data.length; i += 4) {
                             r += data[i];
                             g += data[i + 1];
@@ -100,6 +108,9 @@
             });
         }
 
+        // ==========================================
+        // [모듈 3] 데이터 융합 및 백엔드 통신 파이프라인
+        // ==========================================
         async function analyzeNewSample() {
             const newMileage = parseFloat(document.getElementById('mileageInput').value);
             const file = document.getElementById('fileInput').files[0];
@@ -112,8 +123,10 @@
             status.innerText = "엣지 컴퓨팅: 로컬 이미지 ROI 처리 중...";
 
             try {
+                // 1. 신규 이미지 RGB 추출
                 const newRgb = await extractRGBFromImage(file); 
                 
+                // 2. 과거 데이터(Seed)와 신규 데이터 병합
                 const payload = [
                     ...HISTORICAL_SEED_DATA.map(item => ({...item, isNew: false})),
                     { mileage: newMileage, r: newRgb.r, g: newRgb.g, b: newRgb.b, isNew: true }
@@ -121,6 +134,7 @@
 
                 status.innerText = "백엔드 통신: 비선형 색공간 매핑 및 DI 산출 중...";
 
+                // 3. 서버 통신 (Netlify Function)
                 const response = await fetch('/.netlify/functions/analyze', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -134,6 +148,7 @@
 
                 if (!response.ok) throw new Error(result.error || "서버 통신 오류");
 
+                // 4. 시각화 및 리포트 렌더링
                 renderDashboard(result.data);
                 status.innerText = "분석 완료 및 대시보드 렌더링 완료.";
                 document.getElementById('chartArea').style.display = 'grid';
@@ -144,12 +159,17 @@
             }
         }
 
+        // ==========================================
+        // [모듈 4] 동적 시각화 (Chart.js)
+        // ==========================================
         function renderDashboard(data) {
             const labels = data.map(d => d.x);
             
             function updateChart(canvasId, label, yData, yAxisLabel, lineColor) {
+                // 기존 차트 파괴 (메모리 누수 방지)
                 if (chartInstances[canvasId]) chartInstances[canvasId].destroy();
                 
+                // 타겟 샘플 시인성 강화 (마커 크기 및 색상)
                 const pointColors = data.map(d => d.isNew ? '#FF0000' : (d.pointColor || '#0056b3'));
                 const pointRadii = data.map(d => d.isNew ? 8 : 4);
                 const pointZIndex = data.map(d => d.isNew ? 10 : 1);
@@ -180,14 +200,19 @@
                 });
             }
 
+            // 4개의 다차원 그래프 렌더링
             updateChart('chartL', 'CIE L* (Lightness Decay Sequence)', data.map(d => d.L), 'L* Value', '#555');
             updateChart('chartA', 'CIE a* (Red/Green Vector)', data.map(d => d.a), 'a* Value', '#d9534f');
             updateChart('chartB', 'CIE b* (Yellow/Blue Vector)', data.map(d => d.b), 'b* Value', '#f0ad4e');
             updateChart('chartDegradation', 'Degradation Index (Cumulative Euclidean ΔE)', data.map(d => d.y), 'DI Score', '#5cb85c');
 
+            // 텍스트 리포트 생성 호출
             generateAnalysisReport(data);
         }
 
+        // ==========================================
+        // [모듈 5] 문맥 기반 텍스트 자동 생성 알고리즘 (평문화 적용)
+        // ==========================================
         function generateAnalysisReport(data) {
             const newSample = data.find(d => d.isNew);
             const historicalData = data.filter(d => !d.isNew);
@@ -195,13 +220,15 @@
             
             if (!newSample) return;
 
-            let html = `<h3>[비선형 궤적 추적 리포트] 신규 타겟 샘플 (${newSample.x.toLocaleString()} km)</h3>`;
-            html += `<p>▶ 현재 광학적 열화 상태 판별: <strong>${newSample.phase}</strong> (누적 DI: ${newSample.y.toFixed(2)})</p>`;
+            let html = `<h3>[인공지능 엔진 오일 분석 리포트] 측정된 주행거리: ${newSample.x.toLocaleString()} km</h3>`;
+            html += `<p>▶ 현재 오일 상태 판별: <strong>${newSample.phase}</strong> (누적 오염도: ${newSample.y.toFixed(2)})</p>`;
 
+            // 교체 임계점 도달 여부
             if (newSample.needsReplacement) {
-                html += `<p class="highlight">⚠️ 시스템 경고: 열화 지표가 안전 한계선(Limit Threshold)을 이탈했습니다. 즉각적인 유체 교체를 지시합니다.</p>`;
+                html += `<p class="highlight">⚠️ 시스템 경고: 오염도가 안전 기준을 초과했습니다. 엔진 보호를 위해 즉시 엔진 오일을 교체하시기 바랍니다.</p>`;
             }
 
+            // 과거 데이터와의 시계열 편차 분석 (평문)
             if (historicalData.length > 0) {
                 const nearestSample = historicalData.reduce((prev, curr) => 
                     Math.abs(curr.x - newSample.x) < Math.abs(prev.x - newSample.x) ? curr : prev
@@ -210,17 +237,17 @@
                 const diffMileage = Math.abs(newSample.x - nearestSample.x).toLocaleString();
                 const diffDI = newSample.y - nearestSample.y;
                 
-                html += `<p><br><strong>[국소 궤적 편차 분석 (Local Trajectory Deviation)]</strong><br>`;
-                html += `▶ 레퍼런스 노드(${nearestSample.x.toLocaleString()}km, 거리 오차 ${diffMileage}km) 기준 대비:</p><ul>`;
+                html += `<p><br><strong>[과거 측정 기록과의 비교 분석]</strong><br>`;
+                html += `▶ 가장 주행거리가 비슷한 과거 기록(${nearestSample.x.toLocaleString()}km, 차이: ${diffMileage}km)과 비교한 결과:</p><ul>`;
                 
                 if (newSample.x === nearestSample.x) {
-                    html += `<li>동일 마일리지 선상에서 누적 오염도 스칼라가 ${diffDI > 0 ? '증가' : '감소'}하는 편차를 보였습니다.</li>`;
+                    html += `<li>주행거리는 같지만, 오염도는 과거 측정치보다 ${diffDI > 0 ? '증가' : '감소'}했습니다.</li>`;
                 } else if (diffDI > 30.0) {
-                    html += `<li>엔트로피 변동률이 비정상적으로 급증(<span class="highlight">+${diffDI.toFixed(2)}</span>)했습니다. 기계적 마모 칩 혼입 또는 블로우바이 가스 과다 유입을 점검하십시오.</li>`;
+                    html += `<li>오염도가 비정상적으로 빠르게 나빠졌습니다(<span class="highlight">+${diffDI.toFixed(2)}</span>). 엔진 부품이 갈려 쇳가루가 섞였거나, 엔진 결함으로 연소 가스(매연)가 오일로 새어 들어갔을 수 있으니 정비소 점검이 필요합니다.</li>`;
                 } else if (diffDI < 0.0) {
-                    html += `<li>궤적 역전 현상 발견(${diffDI.toFixed(2)}). 시스템 오차 범위 내이거나 물리적 신유 보충으로 인한 계 희석(Dilution) 상태입니다.</li>`;
+                    html += `<li>오일 상태가 과거 측정 때보다 오히려 더 깨끗해졌습니다(${diffDI.toFixed(2)}). 기계의 측정 오차이거나, 최근에 새 엔진 오일을 추가로 보충(보충유 주입)하셨을 가능성이 있습니다.</li>`;
                 } else {
-                    html += `<li>엔트로피 변동폭(+${diffDI.toFixed(2)})이 다변량 열화 감쇠 곡선의 허용 오차 내에서 안정적으로 제어되고 있습니다.</li>`;
+                    html += `<li>오염도 증가폭(+${diffDI.toFixed(2)})이 정상적인 오일 노후화 범위 안에 있습니다. 오일 상태가 안정적으로 유지되고 있습니다.</li>`;
                 }
                 html += `</ul>`;
             }
